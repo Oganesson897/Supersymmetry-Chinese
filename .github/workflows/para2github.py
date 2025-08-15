@@ -1,226 +1,118 @@
+# download_from_paratranz.py
+
 import json
 import os
 import re
 from pathlib import Path
-from typing import Tuple
-import nbtlib
-from nbtlib.tag import Compound, String, Int
+from typing import Dict, List, Any
 import requests
 
-TOKEN: str = os.getenv("API_TOKEN", "")
-GH_TOKEN: str = os.getenv("GH_TOKEN", "")
+# --- 配置 ---
+# 从环境变量获取
+TOKEN: str = os.getenv("PARATRANZ_API_TOKEN", "")
 PROJECT_ID: str = os.getenv("PROJECT_ID", "")
-FILE_URL: str = f"https://paratranz.cn/api/projects/{PROJECT_ID}/files/"
 
 if not TOKEN or not PROJECT_ID:
-    raise EnvironmentError("环境变量 API_TOKEN 或 PROJECT_ID 未设置。")
+    raise EnvironmentError("请设置环境变量 PARATRANZ_API_TOKEN 和 PROJECT_ID。")
 
-# 初始化列表和字典
-file_id_list: list[int] = []
-file_path_list: list[str] = []
-zh_cn_list: list[dict[str, str]] = []
+SOURCE_DIR = Path("Source")
+OUTPUT_DIR = Path("CNPack")
+API_BASE_URL = "https://paratranz.cn/api/projects/"
+# --- 配置结束 ---
 
-
-def fetch_json(url: str, headers: dict[str, str]) -> list[dict[str, str]]:
+def fetch_api(url: str) -> Any:
+    """通用 API 请求函数"""
+    headers = {"Authorization": TOKEN}
     response = requests.get(url, headers=headers)
     response.raise_for_status()
     return response.json()
 
+def get_all_files() -> List[Dict[str, Any]]:
+    """获取项目中的所有文件列表"""
+    url = f"{API_BASE_URL}{PROJECT_ID}/files"
+    print("正在从 Paratranz 获取文件列表...")
+    files = fetch_api(url)
+    print(f"✅ 成功获取 {len(files)} 个文件。")
+    return files
 
-def translate(file_id: int) -> Tuple[list[str], list[str]]:
-    """
-    获取指定文件的翻译内容并返回键值对列表
-
-    :param file_id: 文件ID
-    :return: 包含键和值的元组列表
-    """
-    url = f"https://paratranz.cn/api/projects/{PROJECT_ID}/files/{file_id}/translation"
-    headers = {"Authorization": TOKEN, "accept": "*/*"}
-    translations = fetch_json(url, headers)
-
-    keys, values = [], []
-
+def get_translation(file_id: int) -> Dict[str, str]:
+    """获取指定文件的翻译内容"""
+    url = f"{API_BASE_URL}{PROJECT_ID}/files/{file_id}/translation"
+    translations = fetch_api(url)
+    
+    processed_dict = {}
     for item in translations:
-        keys.append(item["key"])
+        key = item["key"]
+        # 优先使用翻译，如果翻译为空或处于特定阶段，则使用原文
         translation = item.get("translation", "")
         original = item.get("original", "")
-        # 优先使用翻译内容，缺失时根据 stage 使用原文
-        values.append(
-            original if item["stage"] in [0, -1, 2] or not translation else translation
-        )
-
-    return keys, values
-
-
-def get_files() -> None:
-    """
-    获取项目中的文件列表并提取文件ID和路径
-    """
-    headers = {"Authorization": TOKEN, "accept": "*/*"}
-    files = fetch_json(FILE_URL, headers)
-
-    for file in files:
-        file_id_list.append(file["id"])
-        file_path_list.append(file["name"])
-
-
-def save_translation(zh_cn_dict: dict[str, str], path: Path) -> None:
-    """
-    保存翻译内容到指定的 JSON 文件
-
-    :param zh_cn_dict: 翻译内容的字典
-    :param path: 原始文件路径
-    """
-    dir_path = Path("CNPack") / path.parent
-    dir_path.mkdir(parents=True, exist_ok=True)
-    file_path = dir_path / "zh_cn.json"
-    source_path = str(file_path).replace("zh_cn.json", "en_us.json").replace("CNPack", "Source")
-    with open(file_path, "w", encoding="UTF-8") as f:
-        try:
-            with open(source_path, "r", encoding="UTF-8") as f1:
-                source_json: dict = json.load(f1)
-            keys = source_json.keys()
-            for key in keys:
-                source_json[key] = zh_cn_dict[key]
-            json.dump(source_json, f, ensure_ascii=False, indent=4, separators=(",", ":"))
-        except IOError:
-            print(f"{source_path}路径不存在，文件按首字母排序！")
-            json.dump(zh_cn_dict, f, ensure_ascii=False, indent=4, separators=(",", ":"), sort_keys=True)
-
-
-def process_translation(file_id: int, path: Path) -> dict[str, str]:
-    """
-    处理单个文件的翻译，返回翻译字典
-
-    :param file_id: 文件ID
-    :param path: 文件路径
-    :return: 翻译内容字典
-    """
-    keys, values = translate(file_id)
-
-    # 手动处理文本的替换，避免反斜杠被转义
-    try:
-        with open("Source/" + str(path), "r", encoding="UTF-8") as f:
-            zh_cn_dict = json.load(f)
-    except IOError:
-        zh_cn_dict = {}
-    for key, value in zip(keys, values):
-        # 确保替换 \\u00A0 和 \\n
-        value = re.sub(r"&#92;", r"\\", value)
-        value = re.sub(r"\\u00A0", "\u00A0", value)  # 替换 \\u00A0 为 \u00A0
-        value = re.sub(r"\\n", "\n", value)  # 替换 \\n 为换行符
-        value = re.sub(r'\\"','\"',value)
-        # 保存替换后的值
-        zh_cn_dict[key] = value
+        final_value = original if item["stage"] in [0, -1, 2] or not translation else translation
         
-    # 特殊处理：ftbquest 文件
-    if "ftbquest" in path.name:
-        zh_cn_dict = {
-            key: value.replace(" ", "\u00A0") if "image" not in value else value
-            for key, value in zip(keys, values)
-        }
-    return zh_cn_dict
+        # 处理 Paratranz 导出的特殊字符
+        final_value = re.sub(r"&#92;", r"\\", final_value)
+        final_value = final_value.replace("\\\\n", "\\n") # 修正可能出现的双重转义
 
+        processed_dict[key] = final_value
+        
+    return processed_dict
 
-# Convert JSON data into an NBT compound structure
-def json_to_nbt(data):
-    if isinstance(data, dict):
-        return Compound({key: json_to_nbt(value) for key, value in data.items()})
-    elif isinstance(data, list):
-        return nbtlib.tag.List[nbtlib.tag.String]([json_to_nbt(item) for item in data])
-    elif isinstance(data, str):
-        return String(data)
-    elif isinstance(data, int):
-        return Int(data)
-    else:
-        raise ValueError(f"Unsupported data type: {type(data)}")
+def save_as_lang(translated_dict: Dict[str, str], source_path: Path, output_path: Path):
+    """
+    将翻译字典保存为 .lang 文件，并尽可能保留源文件的顺序和注释。
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    if not source_path.exists():
+        print(f"⚠️ 警告: 源文件 {source_path} 不存在。将按字母顺序保存。")
+        with open(output_path, "w", encoding="utf-8") as f:
+            sorted_keys = sorted(translated_dict.keys())
+            for key in sorted_keys:
+                f.write(f"{key}={translated_dict[key]}\n")
+        return
 
+    print(f"   正在根据 {source_path} 的顺序和注释生成文件...")
+    with open(source_path, "r", encoding="utf-8") as f_in, open(output_path, "w", encoding="utf-8") as f_out:
+        for line in f_in:
+            stripped_line = line.strip()
+            if not stripped_line or stripped_line.startswith("#"):
+                # 保留空行和注释
+                f_out.write(line)
+                continue
+            
+            if "=" in stripped_line:
+                key = stripped_line.split("=", 1)[0].strip()
+                if key in translated_dict:
+                    # 使用翻译后的值写入
+                    f_out.write(f"{key}={translated_dict[key]}\n")
+                else:
+                    # 如果翻译中没有这个key，保留原文（可选）
+                    f_out.write(line)
 
-# Pretty-print SNBT with indentation and wrap all values in double quotes
-def format_snbt(nbt_data, indent=0):
-    INDENT_SIZE = 4  # Number of spaces for each indent level
-    indent_str = ' ' * indent
+def main():
+    """主函数，下载、转换并保存翻译文件"""
+    all_files = get_all_files()
 
-    if isinstance(nbt_data, Compound):
-        formatted = ['{']
-        for key, value in nbt_data.items():
-            formatted.append(f'\n{indent_str}{" " * INDENT_SIZE}{key}:{format_snbt(value, indent + INDENT_SIZE)}')
-        formatted.append(f'\n{indent_str}}}')
-        return ''.join(formatted)
+    for file_info in all_files:
+        file_id = file_info["id"]
+        # Paratranz 中的路径，例如: assets/minecraft/lang/en_us.json
+        paratranz_path_str = file_info["name"]
+        
+        print(f"\n正在处理: {paratranz_path_str} (ID: {file_id})")
+        
+        # 1. 获取翻译
+        translated_content = get_translation(file_id)
+        
+        # 2. 计算输出路径和对应的源文件路径
+        # assets/minecraft/lang/en_us.json -> CNPack/assets/minecraft/lang/zh_cn.lang
+        output_path = OUTPUT_DIR / Path(paratranz_path_str).parent / "zh_cn.lang"
+        # assets/minecraft/lang/en_us.json -> Source/assets/minecraft/lang/en_us.lang
+        source_path = SOURCE_DIR / Path(paratranz_path_str).with_name("en_us.lang")
 
-    elif isinstance(nbt_data, nbtlib.tag.List):
-        formatted = ['[']
-        for item in nbt_data:
-            formatted.append(f'\n{indent_str}{" " * INDENT_SIZE}{format_snbt(item, indent + INDENT_SIZE)}')
-        formatted.append(f'\n{indent_str}]')
-        return ''.join(formatted)
-
-    else:
-        # Wrap all primitive types (String/Int) in double quotes
-        return f'"{str(nbt_data)}"'
-
-
-def escape_quotes(data):
-    if isinstance(data, dict):
-        return {key: escape_quotes(value) for key, value in data.items()}
-    elif isinstance(data, list):
-        return [escape_quotes(item) for item in data]
-    elif isinstance(data, str):
-        return data.replace('"', '\\"')
-    else:
-        return data
-
-
-def normal_json2_ftb_desc(origin_en_us):
-    en_json = json.dumps(origin_en_us, ensure_ascii=False, indent=4, separators=(",", ":"))
-    en_json = eval(en_json)
-    temp_set = set()
-    temp_en_json = {}
-    for key, value in list(en_json.items()):
-        if "desc" in key:
-            key_id = key.split(".")[1]
-            temp_json_array = []
-            for k in en_json.keys():
-                if f"{key_id}.quest_desc" in k:
-                    temp_json_array.append(en_json[k])
-            new_key = f"quest.{key_id}.quest_desc"
-            temp_en_json[new_key] = temp_json_array
-            temp_set.add(key)
-    for key in temp_set:
-        en_json.pop(key, None)
-    en_json.update(temp_en_json)
-
-    print("NormalJson2FtbDesc end...")
-    return en_json
-
-
-def main() -> None:
-    get_files()
-    ftbquests_dict = {}
-    for file_id, path in zip(file_id_list, file_path_list):
-        if "TM" in path:  # 跳过 TM 文件
-            continue
-        zh_cn_dict = process_translation(file_id, Path(path))
-        zh_cn_list.append(zh_cn_dict)
-        if "kubejs/assets/quests/lang/" in path:
-            ftbquests_dict = ftbquests_dict | zh_cn_dict
-        save_translation(zh_cn_dict, Path(path))
-        print(f"已从Patatranz下载到仓库：{re.sub('en_us.json', 'zh_cn.json', path)}")
-    if(len(ftbquests_dict) > 0):
-        snbt_dict = normal_json2_ftb_desc(ftbquests_dict)
-        # json_data = json.dumps(snbt_dict,ensure_ascii=False, indent=4, separators=(",", ":"))
-        # Escape quotation marks in the translated data
-        json_data = escape_quotes(snbt_dict)
-        # Convert the loaded JSON data to NBT format
-        nbt_data = json_to_nbt(json_data)
-        # Format the NBT structure as a pretty-printed SNBT string
-        formatted_snbt_string = format_snbt(nbt_data)
-        # Optionally save the formatted SNBT to a file
-        try:
-            with open('CNPack/config/ftbquests/quests/lang/zh_cn.snbt', 'w', encoding='utf-8') as snbt_file:
-                snbt_file.write(formatted_snbt_string)
-        except Exception as e:
-            print("该ftbquest版本低于1.21.1")
+        # 3. 保存为 .lang 文件
+        save_as_lang(translated_content, source_path, output_path)
+        print(f"✅ 已保存至: {output_path}")
+        
+    print("\n🎉 所有文件处理完毕！")
 
 if __name__ == "__main__":
     main()
